@@ -53,12 +53,6 @@ npm link @ground-creative/agent-sabai-voice-sdk
 npm install alawmulaw pcm-player
 ```
 
-#### 3. For HeyGen avatar support:
-
-```bash
-npm install https://github.com/ground-creative/StreamingAvatarSDK#video-encoding-param
-```
-
 ### Unlinking (when done testing)
 
 ```bash
