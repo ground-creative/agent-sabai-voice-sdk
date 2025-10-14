@@ -191,6 +191,7 @@ EVENT.MARK_SENT;
 
 // Error events
 EVENT.ERROR;
+MIC_PERMISSION_ERROR;
 ```
 
 ### Utility Functions
