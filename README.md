@@ -212,21 +212,6 @@ npm run build        # Build once
 npm run dev          # Build in watch mode
 ```
 
-### Project Structure
-
-```
-src/
-├── core/           # Core components
-│   ├── VoiceClient.ts      # Main client class
-│   ├── AudioSender.ts      # Audio capture & streaming
-│   ├── AudioPlayer.ts      # Audio playback
-│   ├── AudioVisualizer.ts  # Visual audio feedback
-│   └── events.ts           # Event constants
-├── types/          # TypeScript definitions
-├── utils/          # Utility functions
-└── index.ts        # Main exports
-```
-
 ## Browser Support
 
 - Chrome/Chromium 66+
