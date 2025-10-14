@@ -1,0 +1,30 @@
+{
+  "name": "@ground-creative/agent-sabai-voice-sdk",
+  "version": "0.1.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "module": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc -w",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@heygen/streaming-avatar": "github:ground-creative/StreamingAvatarSDK#video-encoding-param",
+    "alawmulaw": "^6.0.0",
+    "cors": "^2.8.5",
+    "node-fetch": "^3.3.2",
+    "pcm-player": "^0.0.18"
+  },
+  "peerDependencies": {
+    "@heygen/streaming-avatar": "github:ground-creative/StreamingAvatarSDK#video-encoding-param",
+    "alawmulaw": "^6.0.0",
+    "pcm-player": "^0.0.18"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

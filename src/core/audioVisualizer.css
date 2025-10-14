@@ -1,0 +1,36 @@
+/* Audio Visualizer / Equalizer Styles */
+.audio-visualizer {
+  display: flex;
+  align-items: flex-end; /* Align bars to the bottom */
+  justify-content: space-between; /* Distribute bars to fill the entire width */
+  width: 100%; /* Full width of its container */
+  height: 100%; /* Full height of its container */
+  /*background: rgba(0, 0, 0, 0.1);*/
+  border-radius: 4px;
+  box-sizing: border-box;
+  overflow: hidden;
+  /*margin: auto;*/
+  gap: 2px; /* Small gap between bars */
+  transition: visibility 0.2s ease; /* Smooth transition for visibility changes */
+}
+
+.equalizer-bar {
+  flex: 1; /* Each bar takes equal width of available space */
+  height: 1%; /* Starting height - will be animated up to 100% */
+  background: linear-gradient(
+    to top,
+    rgba(67, 160, 71, 0.8) 0%,
+    rgba(76, 175, 80, 0.9) 50%,
+    rgba(139, 195, 74, 1) 100%
+  );
+  box-shadow: 0 0 4px rgba(67, 160, 71, 0.5); /* Add glow effect to active bars */
+  margin: 0; /* No margins since we're using gap */
+  border-radius: 2px 2px 0 0; /* Slight rounded corners on top only */
+  transition:
+    height 0.03s ease-out,
+    opacity 0.2s ease; /* Smoother transitions */
+  transform-origin: bottom; /* Ensure the bars grow from bottom */
+  will-change: height, opacity; /* Optimize for animations */
+  min-width: 0; /* No minimum width */
+  max-width: none; /* No maximum width */
+}
