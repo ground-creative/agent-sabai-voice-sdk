@@ -15,8 +15,17 @@ A TypeScript library for real-time voice communication with AI agents, featuring
 
 ### For Production Use
 
+**Option 1: From npm**
+
 ```bash
+# This package will be published to npm soon
 npm install @ground-creative/agent-sabai-voice-sdk
+```
+
+**Option 2: From GitHub**
+
+```bash
+npm install github:ground-creative/agent-sabai-voice-sdk
 ```
 
 ### For Local Development/Testing
