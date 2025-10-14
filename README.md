@@ -99,7 +99,7 @@ client.on(EVENT.ERROR, (error) => {
 // Start a call
 async function startCall() {
   try {
-    await client.startCall("wss://your-websocket-server.com/ws");
+    await client.startCall();
   } catch (error) {
     console.error("Failed to start call:", error);
   }
@@ -107,7 +107,7 @@ async function startCall() {
 
 // Stop the call
 async function stopCall() {
-  await client.stopCall();
+  await client.endCall();
 }
 ```
 
@@ -129,14 +129,12 @@ import {
 } from "@ground-creative/agent-sabai-voice-sdk";
 
 const videoElement = document.getElementById("avatarVideo") as HTMLVideoElement;
-const codec = getBestVideoCodec(true); // Auto-detect best codec
 
 const config: VoiceClientConfig = {
   mode: "video",
   video_config: {
     videoElement,
     avatarName: "your-avatar-name",
-    codec,
     // ... other avatar options
   },
 };
@@ -156,8 +154,8 @@ new VoiceClient(config: VoiceClientConfig)
 
 #### Methods
 
-- `startCall(websocketUrl: string): Promise<void>` - Start a voice call
-- `stopCall(): Promise<void>` - Stop the current call
+- `startCall(): Promise<void>` - Start a voice call
+- `endCall(): Promise<void>` - Stop the current call
 - `abortCall(): Promise<void>` - Abort call startup
 - `setMicMuted(muted: boolean): void` - Mute/unmute microphone
 - `setAudioMuted(muted: boolean): void` - Mute/unmute audio playback
