@@ -1,141 +1,109 @@
-import StreamingAvatar, {
-  AvatarQuality,
-  StreamingEvents,
-  TaskType,
-} from '@heygen/streaming-avatar';
+import {
+  LiveAvatarSession,
+  SessionEvent,
+  AgentEventsEnum,
+} from '@heygen/liveavatar-web-sdk';
 import type { HeygenAvatarOptions } from '../types/config';
 import { DEFAULT_HEYGEN_AVATAR_OPTIONS } from '../types/config';
-import { EVENT } from './events'
+import { EVENT } from './events';
 import { EventEmitter } from './EventEmitter';
 
+// Re-export the event names VoiceClient listens for, keeping the same string
+// values so all existing .on() calls in VoiceClient.ts continue to work unchanged.
+export const StreamingEvents = {
+  STREAM_READY: 'stream_ready',
+  STREAM_DISCONNECTED: 'stream_disconnected',
+  AVATAR_START_TALKING: 'avatar_start_talking',
+  AVATAR_STOP_TALKING: 'avatar_stop_talking',
+  AVATAR_TALKING_MESSAGE: 'avatar_talking_message',
+  AVATAR_END_MESSAGE: 'avatar_end_message',
+  USER_TALKING_MESSAGE: 'user_talking_message',
+  USER_END_MESSAGE: 'user_end_message',
+  USER_START: 'user_start',
+  USER_STOP: 'user_stop',
+  USER_SILENCE: 'user_silence',
+  CONNECTION_QUALITY_CHANGED: 'connection_quality_changed',
+} as const;
+
 export class HeygenAvatarClient extends EventEmitter {
-  private avatar: StreamingAvatar | null = null;
+  private session: LiveAvatarSession | null = null;
   private videoElement: HTMLVideoElement;
-  private apiUrl: string;
-  private avatarName: string;
-  private language?: string;
-  private activityIdleTimeout?: number;
-  private debug: boolean;
   private getTokenUrlConfig: HeygenAvatarOptions['get_token_url_config'];
-  private voice?: any; // optional voice config forwarded to Heygen API
-  private parentVoiceClient: any; // Store reference to parent VoiceClient
-  private isInitializing = false; // Flag to track if initialization is in progress
-  private isInitialized = false; // Flag to track if already initialized
+  private debug: boolean;
+  private parentVoiceClient: any;
+  private isInitializing = false;
+  private isInitialized = false;
   private _aborted = false;
 
   constructor(options: HeygenAvatarOptions & { voiceClient?: any }) {
     super();
 
-    // ✅ Capture reference BEFORE cloning/spreading
     this.parentVoiceClient = options.voiceClient;
 
-    // Merge with defaults AFTER keeping the live ref
     const finalOptions: HeygenAvatarOptions = {
       ...DEFAULT_HEYGEN_AVATAR_OPTIONS,
       ...options,
     };
 
-    // Validate required fields
     if (!finalOptions.videoElement) {
       throw new Error('HeygenAvatarClient: videoElement is required');
     }
-    if (!finalOptions.avatarName || typeof finalOptions.avatarName !== 'string') {
-      throw new Error('HeygenAvatarClient: avatarName must be a string');
-    }
-    if (!finalOptions.get_token_url_config || !finalOptions.get_token_url_config.url) {
+    if (!finalOptions.get_token_url_config?.url) {
       throw new Error('HeygenAvatarClient: get_token_url_config.url is required');
     }
 
     this.videoElement = finalOptions.videoElement;
-    this.apiUrl = finalOptions.get_token_url_config.url;
-    this.avatarName = finalOptions.avatarName;
-    this.debug = finalOptions.debug ?? false;
     this.getTokenUrlConfig = finalOptions.get_token_url_config;
-  // Capture optional voice config (if present in video_config.voice)
-  this.voice = (finalOptions as any).voice;
-    this.language = finalOptions.language;
-    this.activityIdleTimeout = finalOptions.activityIdleTimeout;
+    this.debug = finalOptions.debug ?? false;
 
     this.parentVoiceClient.on(EVENT.CALL_ABORTED, () => {
       this._aborted = true;
-      
       if (this.debug) console.warn('[HeygenAvatarClient] Call aborted');
     });
-
   }
 
   public get isAborting(): boolean {
-   return this._aborted;
+    return this._aborted;
   }
 
   public set isAborting(value: boolean) {
     this._aborted = value;
   }
 
-  /** Public accessor retained for compatibility; always returns false */
+  /** Compatibility stub */
   public getIsTalking(): boolean {
     return false;
   }
 
   public setMuted(muted: boolean): void {
-    if (this.avatar) {
-      if (muted && !this.videoElement.muted) {
-        this.videoElement.muted = true;
-        if (this.debug) console.log('[DEBUG HeygenAvatarClient] Video muted');
-      } else if (!muted && this.videoElement.muted) {
-        this.videoElement.muted = false;
-        if (this.debug) console.log('[DEBUG HeygenAvatarClient] Video unmuted');
-      }
+    if (this.videoElement) {
+      this.videoElement.muted = muted;
     }
   }
-  // No mark buffering here; VoiceClient coordinates marks.
 
   private async fetchAccessToken(): Promise<string> {
+    const cfg = this.getTokenUrlConfig!;
     const fetchOptions: RequestInit = {
-      method: this.getTokenUrlConfig!.payload ? 'POST' : 'GET',
-      headers: this.getTokenUrlConfig!.extra_headers
-        ? { ...this.getTokenUrlConfig!.extra_headers }
-        : undefined,
-      body: this.getTokenUrlConfig!.payload
-        ? JSON.stringify(this.getTokenUrlConfig!.payload)
-        : undefined,
+      method: cfg.payload ? 'POST' : 'GET',
+      headers: cfg.extra_headers ? { ...cfg.extra_headers } : undefined,
+      body: cfg.payload ? JSON.stringify(cfg.payload) : undefined,
     };
-
-    const response = await fetch(this.apiUrl, fetchOptions);
+    const response = await fetch(cfg.url, fetchOptions);
     if (!response.ok) {
       const txt = await response.text();
       throw new Error(`get-access-token failed: ${response.status} ${txt}`);
     }
-    const { token } = await response.json();
-    return token;
+    const body = await response.json();
+    return typeof body === 'string' ? body : body.token ?? body.access_token ?? body.session_token ?? body;
   }
 
   public async initialize() {
-    // Check if we're already initialized or initializing
-    if (this.isInitialized) {
-      // If parent VoiceClient is aborting, we'll allow reinitializing
-      const isAborting = this.isAborting === true;
-
-      if (!isAborting) {
-        if (this.debug) {
-          console.log(
-            '[DEBUG HeygenAvatarClient] Already initialized, ignoring initialize request',
-          );
-        }
-        return; // Skip initialization
-      } else if (this.debug) {
-        console.log(
-          '[DEBUG HeygenAvatarClient] Already initialized but aborting, allowing reinitialization',
-        );
-      }
+    if (this.isInitialized && !this._aborted) {
+      if (this.debug) console.log('[HeygenAvatarClient] Already initialized');
+      return;
     }
-
     if (this.isInitializing) {
-      if (this.debug) {
-        console.log(
-          '[DEBUG HeygenAvatarClient] Initialization already in progress, ignoring duplicate request',
-        );
-      }
+      if (this.debug) console.log('[HeygenAvatarClient] Initialization already in progress');
       return;
     }
 
@@ -143,189 +111,115 @@ export class HeygenAvatarClient extends EventEmitter {
       this.isInitializing = true;
 
       const token = await this.fetchAccessToken();
-      this.avatar = new StreamingAvatar({ token });
+      if (this.debug) console.log('[HeygenAvatarClient] Got session token, starting LiveAvatarSession');
 
-      /*if (this.debug) {
-        // Debug event logging
-        Object.values(StreamingEvents).forEach((event) => {
-          this.avatar?.on(event, (data) =>
-            console.log(`[DEBUG VoiceClient] Avatar Event ${event}:`, data),
-          );
-        });
-      }*/
+      this.session = new LiveAvatarSession(token, { voiceChat: false } as any);
 
-      // Bind event handlers
-      this.avatar.on(StreamingEvents.STREAM_READY, this.handleStreamReady.bind(this));
-      this.avatar.on(StreamingEvents.STREAM_DISCONNECTED, this.handleStreamDisconnected.bind(this));
-
-      // Additional logging for interaction/talking events
-      this.avatar.on(StreamingEvents.AVATAR_START_TALKING, (event: any) => {
-        if (this.debug) console.log('Avatar has started talking:', event);
-        this.emit(StreamingEvents.AVATAR_START_TALKING, event);
-      });
-      this.avatar.on(StreamingEvents.AVATAR_STOP_TALKING, (event: any) => {
-        if (this.debug) console.log('Avatar has stopped talking:', event);
-        this.emit(StreamingEvents.AVATAR_STOP_TALKING, event);
-      });
-      this.avatar.on(StreamingEvents.AVATAR_TALKING_MESSAGE, (message: any) => {
-        if (this.debug) console.log('Avatar talking message:', message);
-      });
-      this.avatar.on(StreamingEvents.AVATAR_END_MESSAGE, (message: any) => {
-        if (this.debug) console.log('Avatar end message:', message);
-      });
-      this.avatar.on(StreamingEvents.USER_TALKING_MESSAGE, (message: any) => {
-        if (this.debug) console.log('User talking message:', message);
-      });
-      this.avatar.on(StreamingEvents.USER_END_MESSAGE, (message: any) => {
-        if (this.debug) console.log('User end message:', message);
-      });
-      this.avatar.on(StreamingEvents.USER_START, (event: any) => {
-        if (this.debug) console.log('User has started interaction:', event);
-      });
-      this.avatar.on(StreamingEvents.USER_STOP, (event: any) => {
-        if (this.debug) console.log('User has stopped interaction:', event);
-      });
-      this.avatar.on(StreamingEvents.USER_SILENCE, () => {
-        if (this.debug) console.log('User is silent');
-      });
-
-      // Build avatarConfig with user or default values
-      let quality: AvatarQuality;
-      const userQuality = this.parentVoiceClient?.video_config?.quality;
-      if (typeof userQuality === 'string') {
-        switch (userQuality.toLowerCase()) {
-          case 'low':
-            quality = AvatarQuality.Low;
-            break;
-          case 'medium':
-            quality = AvatarQuality.Medium;
-            break;
-          case 'high':
-            quality = AvatarQuality.High;
-            break;
-          default:
-            quality = AvatarQuality.High;
+      // Stream ready -> attach to video element
+      this.session.on(SessionEvent.SESSION_STREAM_READY, () => {
+        if (this._aborted) {
+          this.stop().catch(() => {});
+          return;
         }
-      } else if (userQuality && Object.values(AvatarQuality).includes(userQuality)) {
-        quality = userQuality;
-      } else {
-        quality = AvatarQuality.High;
+        if (this.session) {
+          this.session.attach(this.videoElement);
+        }
+        this.videoElement.autoplay = true;
+        this.videoElement.muted = false;
+        this.videoElement.playsInline = true;
+        this.videoElement.onloadedmetadata = async () => {
+          try {
+            await this.videoElement.play();
+            if (this.debug) console.log('[HeygenAvatarClient] Video stream playing');
+            this.emit(StreamingEvents.STREAM_READY, null);
+          } catch (err) {
+            console.warn('[HeygenAvatarClient] Autoplay prevented, waiting for user gesture', err);
+            const resume = () => {
+              this.videoElement.play().catch(() => {});
+              window.removeEventListener('click', resume);
+            };
+            window.addEventListener('click', resume);
+          }
+        };
+      });
+
+      // Disconnected
+      this.session.on(SessionEvent.SESSION_DISCONNECTED, () => {
+        this.videoElement.srcObject = null;
+        if (this.debug) console.log('[HeygenAvatarClient] Session disconnected');
+        this.emit(StreamingEvents.STREAM_DISCONNECTED);
+      });
+
+      // Talking events -- forwarded so VoiceClient mark logic is unchanged
+      this.session.on(AgentEventsEnum.AVATAR_SPEAK_STARTED, (e: any) => {
+        if (this.debug) console.log('[HeygenAvatarClient] Avatar speak started', e);
+        this.emit(StreamingEvents.AVATAR_START_TALKING, e);
+      });
+      this.session.on(AgentEventsEnum.AVATAR_SPEAK_ENDED, (e: any) => {
+        if (this.debug) console.log('[HeygenAvatarClient] Avatar speak ended — calling startListening + emitting AVATAR_STOP_TALKING', e);
+        // Transition back to listening so next audio can be received
+        try { this.session?.startListening(); } catch {}
+        this.emit(StreamingEvents.AVATAR_STOP_TALKING, e);
+      });
+
+      await this.session.start();
+      // Put avatar into listening state immediately after session starts
+      try {
+        this.session.startListening();
+        if (this.debug) console.log('[HeygenAvatarClient] startListening sent after session start');
+      } catch (e) {
+        if (this.debug) console.warn('[HeygenAvatarClient] startListening failed', e);
       }
-      const avatarConfig = {
-        quality,
-        avatarName: this.avatarName || DEFAULT_HEYGEN_AVATAR_OPTIONS.avatarName,
-        videoEncoding: this.parentVoiceClient?.video_config?.videoEncoding || DEFAULT_HEYGEN_AVATAR_OPTIONS.videoEncoding,
-        language: this.language || DEFAULT_HEYGEN_AVATAR_OPTIONS.language,
-        activityIdleTimeout: this.activityIdleTimeout || DEFAULT_HEYGEN_AVATAR_OPTIONS.activityIdleTimeout,
-        ...(this.voice ? { voice: this.voice } : {}),
-      };
-
-      console.log('[DEBUG HeygenAvatarClient] Starting avatar with config:', avatarConfig);
-
-      await this.avatar.createStartAvatar(avatarConfig);
-
-      // Mark as initialized after successful initialization
       this.isInitialized = true;
-
-      if (this.debug) {
-        console.log('[DEBUG HeygenAvatarClient] Initialization completed successfully');
-      }
+      if (this.debug) console.log('[HeygenAvatarClient] LiveAvatarSession started');
     } finally {
       this.isInitializing = false;
     }
   }
 
-  private handleStreamReady(event: any) {
-  if (!event.detail || !this.videoElement) {
-    throw new Error('Stream or video element not available');
-  }
-
-  const isAborting = this.isAborting === true;
-  if (isAborting) {
-    this.stop().catch((err) => {
-      if (this.debug)
-        console.warn('[DEBUG HeygenAvatarClient] Error stopping during abort:', err);
-    });
-    return;
-  }
-
-  const stream = event.detail as MediaStream;
-  this.videoElement.srcObject = stream;
-
-  // Ensure video element attributes allow autoplay
-  this.videoElement.autoplay = true;
-  this.videoElement.muted = false;
-  this.videoElement.playsInline = true; // critical for iOS Safari
-
-  // Try to play when metadata is ready
-  this.videoElement.onloadedmetadata = async () => {
+  /**
+   * Send a batch of TTS audio to the avatar (LITE mode).
+   * Audio must be PCM-16 24 kHz encoded as base64.
+   * Called by VoiceClient when a mark flushes the accumulated audio buffer.
+   */
+  public speakAudio(base64Pcm24k: string): void {
+    if (!this.session) {
+      if (this.debug) console.warn('[HeygenAvatarClient] speakAudio called but session not ready');
+      return;
+    }
     try {
-      await this.videoElement.play();
-      if (this.debug) console.log('[DEBUG HeygenAvatarClient] Video stream playing');
-      this.emit(StreamingEvents.STREAM_READY, stream);
-    } catch (error) {
-      console.warn('[DEBUG HeygenAvatarClient] Autoplay prevented, waiting for user gesture', error);
-      // fallback: wait for a user gesture to start playback
-      const resumePlayback = () => {
-        this.videoElement.play().catch(() => {});
-        window.removeEventListener('click', resumePlayback);
-      };
-      window.addEventListener('click', resumePlayback);
-    }
-  };
-}
-
-
-  private handleStreamDisconnected() {
-    if (this.videoElement) {
-      this.videoElement.srcObject = null;
-      if (this.debug) console.log('[DEBUG VoiceClient] Video Avatar Disconnected');
-      this.emit(StreamingEvents.STREAM_DISCONNECTED);
+      // Transition avatar from listening → speaking
+      this.session.stopListening();
+      if (this.debug) console.log('[HeygenAvatarClient] stopListening sent, sending audio chunk len:', base64Pcm24k.length);
+      this.session.repeatAudio(base64Pcm24k);
+      if (this.debug) console.log('[HeygenAvatarClient] repeatAudio sent');
+    } catch (err) {
+      if (this.debug) console.error('[HeygenAvatarClient] speakAudio error', err);
     }
   }
 
-  public async speak(text: string, task = 'talk') {
-    if (this.avatar && text) {
-      const config = {
-        taskType: task == 'talk' ? TaskType.TALK : TaskType.REPEAT,
-        text: text,
-      };
+  public interrupt(): void {
+    if (this.session) {
       try {
-        await this.avatar.speak(config);
-      } catch (error) {
-        throw error;
-      }
-    } else {
-      const error = 'Avatar not initialized or empty text provided';
-      throw new Error(error);
-    }
-  }
-
-  public async interrupt() {
-    if (this.avatar) {
-      try {
-        await this.avatar.interrupt();
-        if (this.debug) console.log('[DEBUG VoiceClient] Avatar Interrupt Sent');
-      }
-      catch (error) {
-        throw error;
+        this.session.interrupt();
+        if (this.debug) console.log('[HeygenAvatarClient] Interrupt sent');
+      } catch (err) {
+        if (this.debug) console.error('[HeygenAvatarClient] Interrupt error', err);
       }
     }
   }
 
   public async stop() {
-    if (!this.avatar) {
-      return;
-    }
-
+    if (!this.session) return;
     try {
-      await this.avatar.stopAvatar();
+      await this.session.stop();
       this.videoElement.srcObject = null;
-      this.avatar = null;
-      this.isInitialized = false; // Reset the initialization flag
-      if (this.debug) console.log('[DEBUG VoiceClient] Video Avatar Stopped Successfully');
-    } catch (error) {
-      throw error;
+      if (this.debug) console.log('[HeygenAvatarClient] Session stopped');
+    } catch {
+      // ignore stop errors
+    } finally {
+      this.session = null;
+      this.isInitialized = false;
     }
   }
 }

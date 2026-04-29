@@ -9,7 +9,7 @@ import type {
   AudioVisualizerOptions,
   DebugMode,
 } from '../types/config';
-import { StreamingEvents } from '@heygen/streaming-avatar';
+import { StreamingEvents } from './HeygenAvatarClient';
 import {
   DEFAULT_AUDIO_OPTIONS,
   DEFAULT_TRANSPORT_OPTIONS,
@@ -21,6 +21,8 @@ import { EVENT } from './events';
 import { AudioPlayer } from './AudioPlayer';
 import { attachDebugLogs } from '../utils/debug';
 import { MarkQueue, isInterruptMark } from '../utils/marks';
+import { resamplePcm16, pcm16ToBase64, base64ToUint8 } from '../utils/audioUtils';
+import { mulaw } from 'alawmulaw';
 
 export interface VoiceClientConfig extends VoiceClientOptions {
   server_config: TransportOptions;
@@ -54,6 +56,9 @@ export class VoiceClient extends EventEmitter {
   private _isAborting = false; // Track if abort is in progress
   private _isTalking = false; // Avatar talking state (video mode)
   private _lastMark: string | null = null; // Buffer latest mark from server
+  private _videoAudioBuffer: Int16Array[] = []; // Accumulates TTS audio chunks between marks (video mode)
+  private _pendingVideoAudioBuffer: Int16Array[] = []; // Audio received before avatar ready
+  private _pendingMark: string | null = null; // Mark received before avatar ready
   private _videoReady = false; // whether avatar stream is ready
   private _pendingCompletionText: string | null = null; // store completion text until avatar ready
   private _markQueue = new MarkQueue();
@@ -269,7 +274,6 @@ export class VoiceClient extends EventEmitter {
       EVENT.MIC_STREAM_CLOSE,
       EVENT.MEDIA_RECEIVED,
       EVENT.MARK_RECEIVED,
-      EVENT.COMPLETION_MESSAGE,
     ].forEach((ev) => this.proto.on(ev, (data) => this.emit(ev, data)));
     // Ensure local state resets on connection close (network loss or normal stop)
     this.proto.on(EVENT.MIC_STREAM_CLOSE, async () => {
@@ -304,17 +308,27 @@ export class VoiceClient extends EventEmitter {
       this._endedByUser = false;
     });
 
-    if (!this.videoAvatar) {
-      // Playback: stream play media and clear between utterances
-      this.proto.on(EVENT.MEDIA_RECEIVED, (payload: any) => {
-        try {
-          const b64: string | undefined = payload?.media?.payload ?? payload?.data ?? payload?.media;
-          const meta: any = payload?.meta ?? payload?.media?.meta;
+    // Playback: stream play media and clear between utterances
+    this.proto.on(EVENT.MEDIA_RECEIVED, (payload: any) => {
+      try {
+        const b64: string | undefined = payload?.media?.payload ?? payload?.data ?? payload?.media;
+        const meta: any = payload?.meta ?? payload?.media?.meta;
+        if (this.videoAvatar) {
+          // Video mode: accumulate decoded PCM into buffer until mark arrives
+          if (b64) {
+            const bytes = base64ToUint8(b64);
+            const pcm16 = mulaw.decode(bytes);
+            this._videoAudioBuffer.push(pcm16);
+          }
+        } else {
           if (b64) this.audioPlayer?.appendChunk(b64, meta);
-        } catch (e) {
-          this.debugComponents && console.warn('[VoiceClient] AudioPlayer append failed:', e);
         }
-      });
+      } catch (e) {
+        this.debugComponents && console.warn('[VoiceClient] media received handler failed:', e);
+      }
+    });
+
+    if (!this.videoAvatar) {
       this.proto.on(EVENT.INTERRUPT, () => this.audioPlayer?.clear());
 
       // Capture marks as end-of-utterance signals OR server interrupt markers
@@ -361,20 +375,24 @@ export class VoiceClient extends EventEmitter {
       });
       this.videoAvatar.on(StreamingEvents.STREAM_READY, () => {
         this._videoReady = true;
-        // If we have a pending completion text (received before avatar was ready), speak it now
-        if (this._pendingCompletionText) {
-          const text = this._pendingCompletionText;
-          this._pendingCompletionText = null;
-          if (this.videoAvatar) {
-            this.videoAvatar
-              .speak(text, 'repeat')
-              .catch((err: any) =>
-                this.debugComponents &&
-                console.error('[DEBUG VoiceClient] Avatar repeat speak error (queued):', err),
-              );
-          } else if (this.debugComponents) {
-            console.warn('[DEBUG VoiceClient] Pending completion text present but videoAvatar missing');
-          }
+        // Flush any audio that arrived before session was ready
+        if (this._pendingVideoAudioBuffer.length > 0) {
+          const buffer = this._pendingVideoAudioBuffer;
+          this._pendingVideoAudioBuffer = [];
+          const markName = this._pendingMark;
+          this._pendingMark = null;
+          const totalLen = buffer.reduce((s, c) => s + c.length, 0);
+          const combined = new Int16Array(totalLen);
+          let offset = 0;
+          for (const chunk of buffer) { combined.set(chunk, offset); offset += chunk.length; }
+          resamplePcm16(combined, 16000, 24000).then((pcm24k) => {
+            const b64 = pcm16ToBase64(pcm24k);
+            this.debugComponents && console.log('[VoiceClient] Flushing pending audio on STREAM_READY, mark:', markName);
+            this.videoAvatar?.speakAudio(b64);
+            if (markName) this._lastMark = markName;
+          }).catch((err: any) => {
+            this.debugComponents && console.error('[VoiceClient] pending resample error', err);
+          });
         }
       });
       this.videoAvatar.on(StreamingEvents.AVATAR_STOP_TALKING, () => {
@@ -383,47 +401,51 @@ export class VoiceClient extends EventEmitter {
         this._lastMark = null;
       });
 
-      // When completion_message arrives, forward it and also have the avatar repeat it (video mode)
-      this.proto.on(EVENT.COMPLETION_MESSAGE, (payload: any) => {
-        try {
-          const text: string | undefined = payload?.data?.text ?? payload?.text;
-          if (!text) return;
-          // If avatar not ready yet, queue the text to be spoken when stream becomes ready
-          if (!this._videoReady) {
-            this._pendingCompletionText = text;
-            if (this.debugComponents) console.log('[DEBUG VoiceClient] Queued completion text until avatar ready');
-            return;
-          }
-          if (this.videoAvatar) {
-            this.videoAvatar
-              .speak(text, 'repeat')
-              .catch(
-                (err: any) =>
-                  this.debugComponents &&
-                  console.error('[DEBUG VoiceClient] Avatar repeat speak error:', err),
-              );
-          }
-        } catch (err) {
-          this.debugComponents &&
-            console.error('[DEBUG VoiceClient] Error handling completion_message:', err);
-        }
-      });
-
+      // Video mode mark handling:
+      // Non-interrupt mark -> flush accumulated audio buffer -> resample to 24kHz -> send to avatar
+      // Interrupt mark -> clear buffer, interrupt avatar, echo mark immediately
       this.proto.on(EVENT.MARK_RECEIVED, async (payload: any) => {
         const markName: string | undefined = payload?.mark?.name ?? payload?.name;
         if (!markName) return;
-          if (isInterruptMark(markName)) {
-           try {
-             await this.videoAvatar?.interrupt();
-            } catch {}
-            this.emit(EVENT.INTERRUPT, { streamSid: this.streamSid, mark: markName });
-            this._lastMark = null;
-            this.safeSendMark(markName);
-            return;
-          }
-        else{
-          this._lastMark = markName;
+        if (isInterruptMark(markName)) {
+          this._videoAudioBuffer = [];
+          try { this.videoAvatar?.interrupt(); } catch {}
+          this.emit(EVENT.INTERRUPT, { streamSid: this.streamSid, mark: markName });
+          this._lastMark = null;
+          this.safeSendMark(markName);
+          return;
         }
+        // If avatar not ready yet, accumulate into pending buffer
+        if (!this._videoReady) {
+          // Keep accumulating; last mark wins (will be sent after STREAM_READY flush)
+          this._pendingVideoAudioBuffer.push(...this._videoAudioBuffer);
+          this._videoAudioBuffer = [];
+          this._pendingMark = markName;
+          this.debugComponents && console.log('[VoiceClient] Avatar not ready, queuing audio for mark:', markName);
+          return;
+        }
+        // Flush buffer: concatenate all accumulated PCM16 chunks
+        if (this._videoAudioBuffer.length > 0) {
+          const buffer = this._videoAudioBuffer;
+          this._videoAudioBuffer = [];
+          try {
+            const totalLen = buffer.reduce((s, c) => s + c.length, 0);
+            const combined = new Int16Array(totalLen);
+            let offset = 0;
+            for (const chunk of buffer) { combined.set(chunk, offset); offset += chunk.length; }
+            // Resample 16kHz -> 24kHz then send to avatar
+            resamplePcm16(combined, 16000, 24000).then((pcm24k) => {
+              const b64 = pcm16ToBase64(pcm24k);
+              this.videoAvatar?.speakAudio(b64);
+            }).catch((err: any) => {
+              this.debugComponents && console.error('[VoiceClient] resample error', err);
+            });
+          } catch (err) {
+            this.debugComponents && console.error('[VoiceClient] audio flush error', err);
+          }
+        }
+        // Buffer mark — echoed after AVATAR_STOP_TALKING (AVATAR_SPEAK_ENDED)
+        this._lastMark = markName;
       });
     }
   }
